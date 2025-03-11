@@ -76,7 +76,6 @@ LOG_FILE="/var/log/vpnagentd-watchdog.log"
 
 log() {
     echo "$(date): $1" >> "$LOG_FILE"
-    echo "$(date): $1"
 }
 
 restart_service() {
@@ -162,10 +161,20 @@ if [ -d "$HOME/.local/share/applications" ]; then
 fi
 
 # Reload systemd and restart vpnagentd
-echo "Reloading systemd, starting vpnagentd service and watchdog..."
+echo "Reloading systemd and starting vpnagentd service..."
 systemctl daemon-reload
 systemctl restart vpnagentd.service
-systemctl start vpnagentd-watchdog.service
+
+# Start the watchdog service in the background
+echo "Starting vpnagentd-watchdog service in the background..."
+systemctl start vpnagentd-watchdog.service &
+
+# Wait a moment to ensure service starts properly
+sleep 2
+
+# Verify the watchdog service status without hanging
+echo "Checking service status (non-blocking)..."
+systemctl is-active --quiet vpnagentd-watchdog.service && echo "Watchdog service started successfully" || echo "Watchdog service may have failed to start - check logs for details"
 
 # Cleanup
 echo "Cleaning up temporary files..."
