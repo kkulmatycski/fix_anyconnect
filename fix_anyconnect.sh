@@ -48,7 +48,7 @@ cp .libs/libxml2.so.2.11.5 /opt/cisco/anyconnect/libxml/
 echo "[6/7] Configuring VPN daemon service..."
 cat > /etc/systemd/system/vpnagentd.service << 'EOF'
 [Unit]
-Description=Cisco AnyConnect Secure Mobility Agent for Linux
+Description=Cisco Secure Client VPN Agent
 Requires=NetworkManager.service
 After=NetworkManager.service
 
@@ -58,10 +58,78 @@ ExecStart=env 'LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH' /o
 ExecStop=/opt/cisco/secureclient/bin/vpn disconnect
 PIDFile=/var/run/vpnagentd.pid
 KillMode=process
+Restart=on-failure
+RestartSec=10s
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Create watchdog script
+echo "[6.1/7] Creating VPN agent watchdog service..."
+cat > /usr/local/bin/vpnagentd-watchdog.sh << 'EOF'
+#!/bin/bash
+# Watchdog script for Cisco Secure Client VPN Agent
+# This script monitors the vpnagentd service and restarts it if it dies
+
+LOG_FILE="/var/log/vpnagentd-watchdog.log"
+
+log() {
+    echo "$(date): $1" >> "$LOG_FILE"
+    echo "$(date): $1"
+}
+
+restart_service() {
+    log "Restarting vpnagentd service..."
+    systemctl restart vpnagentd.service
+    
+    if [ $? -eq 0 ]; then
+        log "Successfully restarted vpnagentd service."
+    else
+        log "Failed to restart vpnagentd service."
+    fi
+}
+
+log "Starting VPN Agent watchdog service"
+
+while true; do
+    # Check if vpnagentd is running
+    if ! systemctl is-active --quiet vpnagentd.service; then
+        log "VPN Agent service is not running."
+        restart_service
+    fi
+    
+    # Check for XML parsing errors in the logs
+    if journalctl -u vpnagentd.service --since "1 minute ago" | grep -q "xmlCreateFileParserCtxt"; then
+        log "Detected XML parsing error, restarting service."
+        restart_service
+    fi
+    
+    # Sleep for 30 seconds before checking again
+    sleep 30
+done
+EOF
+
+chmod +x /usr/local/bin/vpnagentd-watchdog.sh
+
+# Create watchdog service
+cat > /etc/systemd/system/vpnagentd-watchdog.service << 'EOF'
+[Unit]
+Description=Watchdog for Cisco Secure Client VPN Agent
+After=vpnagentd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpnagentd-watchdog.sh
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable watchdog service
+systemctl enable vpnagentd-watchdog.service
 
 # Step 7: Create desktop file for GNOME
 echo "[7/7] Configuring desktop files..."
@@ -94,9 +162,10 @@ if [ -d "$HOME/.local/share/applications" ]; then
 fi
 
 # Reload systemd and restart vpnagentd
-echo "Reloading systemd and restarting vpnagentd service..."
+echo "Reloading systemd, starting vpnagentd service and watchdog..."
 systemctl daemon-reload
 systemctl restart vpnagentd.service
+systemctl start vpnagentd-watchdog.service
 
 # Cleanup
 echo "Cleaning up temporary files..."
@@ -110,4 +179,10 @@ echo "You can now launch Cisco AnyConnect using:"
 echo "1. The application menu"
 echo "2. Terminal command: env 'LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:\$LD_LIBRARY_PATH' /opt/cisco/secureclient/bin/vpnui"
 echo "3. Verify the service is running: systemctl status vpnagentd.service"
+echo ""
+echo "A watchdog service has been installed to automatically restart"
+echo "the VPN agent if it crashes. You can check its status with:"
+echo "systemctl status vpnagentd-watchdog.service"
+echo ""
+echo "Logs from the watchdog will be written to /var/log/vpnagentd-watchdog.log"
 echo "==============================================="
