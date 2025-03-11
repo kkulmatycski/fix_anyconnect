@@ -44,6 +44,23 @@ echo "[5/7] Copying libxml2 library files..."
 cp .libs/libxml2.so.2 /opt/cisco/anyconnect/libxml/
 cp .libs/libxml2.so.2.11.5 /opt/cisco/anyconnect/libxml/
 
+# Create a symbolic link to the XML parser interfaces
+echo "Creating symbolic links for XML parser interfaces..."
+mkdir -p /opt/cisco/anyconnect/libxml/include
+cp -r include/libxml /opt/cisco/anyconnect/libxml/include/
+
+# Create a custom launch script for vpnagentd
+echo "Creating custom launch script for vpnagentd..."
+cat > /opt/cisco/secureclient/bin/vpnagentd-wrapper.sh << 'EOF'
+#!/bin/bash
+# Wrapper script for vpnagentd to ensure proper library loading
+export LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH
+export LD_PRELOAD=/opt/cisco/anyconnect/libxml/libxml2.so.2
+exec /opt/cisco/secureclient/bin/vpnagentd "$@"
+EOF
+
+chmod +x /opt/cisco/secureclient/bin/vpnagentd-wrapper.sh
+
 # Step 6: Configure the VPN daemon service
 echo "[6/7] Configuring VPN daemon service..."
 cat > /etc/systemd/system/vpnagentd.service << 'EOF'
@@ -54,7 +71,7 @@ After=NetworkManager.service
 
 [Service]
 Type=forking
-ExecStart=env 'LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH' /opt/cisco/secureclient/bin/vpnagentd -execv_instance
+ExecStart=/opt/cisco/secureclient/bin/vpnagentd-wrapper.sh -execv_instance
 ExecStop=/opt/cisco/secureclient/bin/vpn disconnect
 PIDFile=/var/run/vpnagentd.pid
 KillMode=process
@@ -133,11 +150,23 @@ systemctl enable vpnagentd-watchdog.service
 # Step 7: Create desktop file for GNOME
 echo "[7/7] Configuring desktop files..."
 
-# Create backup of original desktop file if it exists
+# Create a custom launch script for vpnui
+echo "Creating custom launch script for vpnui..."
+cat > /opt/cisco/secureclient/bin/vpnui-wrapper.sh << 'EOF'
+#!/bin/bash
+# Wrapper script for vpnui to ensure proper library loading
+export LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH
+export LD_PRELOAD=/opt/cisco/anyconnect/libxml/libxml2.so.2
+exec /opt/cisco/secureclient/bin/vpnui "$@"
+EOF
+
+chmod +x /opt/cisco/secureclient/bin/vpnui-wrapper.sh
+
+# Update desktop file for GNOME
 if [ -f "/usr/share/applications/com.cisco.secureclient.gui.desktop" ]; then
     cp /usr/share/applications/com.cisco.secureclient.gui.desktop /usr/share/applications/com.cisco.secureclient.gui.desktop.bak
     # Update existing desktop file
-    sed -i 's|^Exec=.*|Exec=env '\''LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH'\'' /opt/cisco/secureclient/bin/vpnui|' /usr/share/applications/com.cisco.secureclient.gui.desktop
+    sed -i 's|^Exec=.*|Exec=/opt/cisco/secureclient/bin/vpnui-wrapper.sh|' /usr/share/applications/com.cisco.secureclient.gui.desktop
 else
     # Create new desktop file if it doesn't exist
     cat > /usr/share/applications/com.cisco.secureclient.gui.desktop << 'EOF'
@@ -146,7 +175,7 @@ Type=Application
 Name=Cisco Secure Client
 Comment=Cisco Secure Client
 Icon=/opt/cisco/secureclient/pixmaps/vpnui.png
-Exec=env 'LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH' /opt/cisco/secureclient/bin/vpnui
+Exec=/opt/cisco/secureclient/bin/vpnui-wrapper.sh
 Terminal=false
 Categories=Network;
 EOF
@@ -156,7 +185,7 @@ fi
 if [ -d "$HOME/.local/share/applications" ]; then
     if [ -f "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop" ]; then
         cp "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop" "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop.bak"
-        sed -i 's|^Exec=.*|Exec=env '\''LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH'\'' /opt/cisco/secureclient/bin/vpnui|' "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop"
+        sed -i 's|^Exec=.*|Exec=/opt/cisco/secureclient/bin/vpnui-wrapper.sh|' "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop"
     fi
 fi
 
@@ -186,7 +215,7 @@ echo "  Fix installed successfully!"
 echo "==============================================="
 echo "You can now launch Cisco AnyConnect using:"
 echo "1. The application menu"
-echo "2. Terminal command: env 'LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:\$LD_LIBRARY_PATH' /opt/cisco/secureclient/bin/vpnui"
+echo "2. Terminal command: /opt/cisco/secureclient/bin/vpnui-wrapper.sh"
 echo "3. Verify the service is running: systemctl status vpnagentd.service"
 echo ""
 echo "A watchdog service has been installed to automatically restart"
