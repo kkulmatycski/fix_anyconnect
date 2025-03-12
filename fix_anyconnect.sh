@@ -49,6 +49,13 @@ echo "Creating symbolic links for XML parser interfaces..."
 mkdir -p /opt/cisco/anyconnect/libxml/include
 cp -r include/libxml /opt/cisco/anyconnect/libxml/include/
 
+# Create necessary CustomerExperienceFeedback directory
+echo "Creating CustomerExperienceFeedback directory..."
+mkdir -p /opt/cisco/secureclient/CustomerExperienceFeedback
+touch /opt/cisco/secureclient/CustomerExperienceFeedback/config
+chmod -R 755 /opt/cisco/secureclient/CustomerExperienceFeedback
+chown -R root:root /opt/cisco/secureclient/CustomerExperienceFeedback
+
 # Create a custom launch script for vpnagentd
 echo "Creating custom launch script for vpnagentd..."
 cat > /opt/cisco/secureclient/bin/vpnagentd-wrapper.sh << 'EOF'
@@ -73,8 +80,10 @@ After=NetworkManager.service
 Type=forking
 ExecStart=/opt/cisco/secureclient/bin/vpnagentd-wrapper.sh -execv_instance
 ExecStop=/opt/cisco/secureclient/bin/vpn disconnect
-PIDFile=/var/run/vpnagentd.pid
+PIDFile=/run/vpnagentd.pid
 KillMode=process
+TimeoutStartSec=300
+TimeoutStopSec=60
 Restart=on-failure
 RestartSec=10s
 
@@ -95,8 +104,28 @@ log() {
     echo "$(date): $1" >> "$LOG_FILE"
 }
 
+# Wait for any existing vpndownloader process to complete
+wait_for_downloader() {
+    log "Checking for vpndownloader processes..."
+    for i in {1..30}; do
+        if ! pgrep -f "vpndownloader" > /dev/null; then
+            log "No vpndownloader processes running."
+            return 0
+        fi
+        log "Waiting for vpndownloader to finish (attempt $i/30)..."
+        sleep 1
+    done
+    
+    # If still running after timeout, kill it
+    log "Timeout waiting for vpndownloader, killing processes..."
+    pkill -f "vpndownloader"
+    sleep 2
+    return 0
+}
+
 restart_service() {
     log "Restarting vpnagentd service..."
+    wait_for_downloader
     systemctl restart vpnagentd.service
     
     if [ $? -eq 0 ]; then
@@ -189,10 +218,32 @@ if [ -d "$HOME/.local/share/applications" ]; then
     fi
 fi
 
+# Disable Auto Update in AnyConnect's local policy
+echo "Disabling Auto Update in AnyConnect's local policy..."
+if [ -f "/opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml" ]; then
+    # Back up the original file
+    cp /opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml /opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml.bak
+    
+    # Check if AutoUpdate tag exists and update it
+    if grep -q "<AutoUpdate>" /opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml; then
+        sed -i 's|<AutoUpdate>true</AutoUpdate>|<AutoUpdate>false</AutoUpdate>|g' /opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml
+    else
+        # If AutoUpdate tag doesn't exist, add it under ClientInitialization
+        if grep -q "</ClientInitialization>" /opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml; then
+            sed -i 's|</ClientInitialization>|  <AutoUpdate>false</AutoUpdate>\n</ClientInitialization>|g' /opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml
+        else
+            echo "Could not find ClientInitialization tag in policy file. Manual update of AutoUpdate setting required."
+        fi
+    fi
+fi
+
 # Reload systemd and restart vpnagentd
 echo "Reloading systemd and starting vpnagentd service..."
 systemctl daemon-reload
-systemctl restart vpnagentd.service
+systemctl stop vpnagentd.service
+pkill -f vpndownloader 2>/dev/null || true
+sleep 2
+systemctl start vpnagentd.service
 
 # Start the watchdog service in the background
 echo "Starting vpnagentd-watchdog service in the background..."
