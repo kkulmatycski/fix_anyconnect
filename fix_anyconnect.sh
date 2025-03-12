@@ -49,7 +49,7 @@ echo "Creating symbolic links for XML parser interfaces..."
 mkdir -p /opt/cisco/anyconnect/libxml/include
 cp -r include/libxml /opt/cisco/anyconnect/libxml/include/
 
-# Create necessary CustomerExperienceFeedback directory
+# Create necessary customer experience feedback directory
 echo "Creating CustomerExperienceFeedback directory..."
 mkdir -p /opt/cisco/secureclient/CustomerExperienceFeedback
 touch /opt/cisco/secureclient/CustomerExperienceFeedback/config
@@ -57,145 +57,115 @@ chmod -R 755 /opt/cisco/secureclient/CustomerExperienceFeedback
 chown -R root:root /opt/cisco/secureclient/CustomerExperienceFeedback
 
 # Create a custom launch script for vpnagentd
-echo "Creating custom launch script for vpnagentd..."
-cat > /opt/cisco/secureclient/bin/vpnagentd-wrapper.sh << 'EOF'
+echo "[6/7] Creating startup scripts..."
+cat > /usr/local/bin/vpnagentd-wrapper.sh << 'EOF'
 #!/bin/bash
 # Wrapper script for vpnagentd to ensure proper library loading
+
+# Kill any existing vpnagentd processes
+pkill -f vpnagentd 2>/dev/null || true
+
+# Wait for processes to terminate
+sleep 2
+
+# Environment setup
 export LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH
 export LD_PRELOAD=/opt/cisco/anyconnect/libxml/libxml2.so.2
-exec /opt/cisco/secureclient/bin/vpnagentd "$@"
+
+# Start vpnagentd in the background
+/opt/cisco/secureclient/bin/vpnagentd &
+
+# Store the PID
+echo $! > /run/vpnagentd.pid
+
+# Wait for agent to initialize
+sleep 3
+
+echo "Cisco Secure Client VPN Agent started at $(date)"
 EOF
 
-chmod +x /opt/cisco/secureclient/bin/vpnagentd-wrapper.sh
+chmod +x /usr/local/bin/vpnagentd-wrapper.sh
 
-# Step 6: Configure the VPN daemon service
-echo "[6/7] Configuring VPN daemon service..."
-cat > /etc/systemd/system/vpnagentd.service << 'EOF'
-[Unit]
-Description=Cisco Secure Client VPN Agent
-Requires=NetworkManager.service
-After=NetworkManager.service
-
-[Service]
-Type=forking
-ExecStart=/opt/cisco/secureclient/bin/vpnagentd-wrapper.sh -execv_instance
-ExecStop=/opt/cisco/secureclient/bin/vpn disconnect
-PIDFile=/run/vpnagentd.pid
-KillMode=process
-TimeoutStartSec=300
-TimeoutStopSec=60
-Restart=on-failure
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Create watchdog script
-echo "[6.1/7] Creating VPN agent watchdog service..."
-cat > /usr/local/bin/vpnagentd-watchdog.sh << 'EOF'
+# Create an auto-restart monitor script
+cat > /usr/local/bin/vpnagentd-monitor.sh << 'EOF'
 #!/bin/bash
-# Watchdog script for Cisco Secure Client VPN Agent
-# This script monitors the vpnagentd service and restarts it if it dies
+# Monitor script to ensure vpnagent stays running
 
-LOG_FILE="/var/log/vpnagentd-watchdog.log"
+LOG_FILE="/var/log/vpnagentd-monitor.log"
 
 log() {
-    echo "$(date): $1" >> "$LOG_FILE"
+    echo "$(date): $1" | tee -a "$LOG_FILE"
 }
 
-# Wait for any existing vpndownloader process to complete
-wait_for_downloader() {
-    log "Checking for vpndownloader processes..."
-    for i in {1..30}; do
-        if ! pgrep -f "vpndownloader" > /dev/null; then
-            log "No vpndownloader processes running."
-            return 0
-        fi
-        log "Waiting for vpndownloader to finish (attempt $i/30)..."
-        sleep 1
-    done
+restart_vpnagent() {
+    log "Restarting VPN agent..."
     
-    # If still running after timeout, kill it
-    log "Timeout waiting for vpndownloader, killing processes..."
-    pkill -f "vpndownloader"
-    sleep 2
-    return 0
-}
-
-restart_service() {
-    log "Restarting vpnagentd service..."
-    wait_for_downloader
-    systemctl restart vpnagentd.service
+    # Kill any existing vpndownloader processes
+    pkill -f vpndownloader 2>/dev/null || true
+    sleep 1
     
-    if [ $? -eq 0 ]; then
-        log "Successfully restarted vpnagentd service."
-    else
-        log "Failed to restart vpnagentd service."
-    fi
+    # Start the wrapper
+    /usr/local/bin/vpnagentd-wrapper.sh
+    
+    log "VPN agent restarted"
 }
 
-log "Starting VPN Agent watchdog service"
+# Initial startup
+log "Starting VPN agent monitor"
+restart_vpnagent
 
+# Main monitoring loop
 while true; do
     # Check if vpnagentd is running
-    if ! systemctl is-active --quiet vpnagentd.service; then
-        log "VPN Agent service is not running."
-        restart_service
+    if ! pgrep -f "vpnagentd" > /dev/null; then
+        log "VPN Agent process not found, restarting..."
+        restart_vpnagent
     fi
     
-    # Check for XML parsing errors in the logs
-    if journalctl -u vpnagentd.service --since "1 minute ago" | grep -q "xmlCreateFileParserCtxt"; then
-        log "Detected XML parsing error, restarting service."
-        restart_service
-    fi
-    
-    # Sleep for 30 seconds before checking again
+    # Sleep for 30 seconds between checks
     sleep 30
 done
 EOF
 
-chmod +x /usr/local/bin/vpnagentd-watchdog.sh
+chmod +x /usr/local/bin/vpnagentd-monitor.sh
 
-# Create watchdog service
-cat > /etc/systemd/system/vpnagentd-watchdog.service << 'EOF'
-[Unit]
-Description=Watchdog for Cisco Secure Client VPN Agent
-After=vpnagentd.service
+# Disable systemd service if it exists
+if [ -f "/etc/systemd/system/vpnagentd.service" ]; then
+    echo "Disabling systemd service for vpnagentd..."
+    systemctl stop vpnagentd.service 2>/dev/null || true
+    systemctl disable vpnagentd.service 2>/dev/null || true
+fi
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/vpnagentd-watchdog.sh
-Restart=always
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable watchdog service
-systemctl enable vpnagentd-watchdog.service
-
-# Step 7: Create desktop file for GNOME
-echo "[7/7] Configuring desktop files..."
-
-# Create a custom launch script for vpnui
+# Create a startup script for VPN UI
 echo "Creating custom launch script for vpnui..."
-cat > /opt/cisco/secureclient/bin/vpnui-wrapper.sh << 'EOF'
+cat > /usr/local/bin/vpnui-wrapper.sh << 'EOF'
 #!/bin/bash
 # Wrapper script for vpnui to ensure proper library loading
+
 export LD_LIBRARY_PATH=/opt/cisco/anyconnect/libxml:$LD_LIBRARY_PATH
 export LD_PRELOAD=/opt/cisco/anyconnect/libxml/libxml2.so.2
+
+# Check if vpnagentd is running, start it if not
+if ! pgrep -f "vpnagentd" > /dev/null; then
+    echo "VPN Agent is not running, starting it..."
+    sudo /usr/local/bin/vpnagentd-wrapper.sh
+    sleep 2
+fi
+
+# Start the UI
 exec /opt/cisco/secureclient/bin/vpnui "$@"
 EOF
 
-chmod +x /opt/cisco/secureclient/bin/vpnui-wrapper.sh
+chmod +x /usr/local/bin/vpnui-wrapper.sh
 
-# Update desktop file for GNOME
+# Step 7: Configure autostart and desktop files
+echo "[7/7] Configuring desktop files and autostart..."
+
+# Create Desktop entry
 if [ -f "/usr/share/applications/com.cisco.secureclient.gui.desktop" ]; then
     cp /usr/share/applications/com.cisco.secureclient.gui.desktop /usr/share/applications/com.cisco.secureclient.gui.desktop.bak
     # Update existing desktop file
-    sed -i 's|^Exec=.*|Exec=/opt/cisco/secureclient/bin/vpnui-wrapper.sh|' /usr/share/applications/com.cisco.secureclient.gui.desktop
+    sed -i 's|^Exec=.*|Exec=/usr/local/bin/vpnui-wrapper.sh|' /usr/share/applications/com.cisco.secureclient.gui.desktop
 else
     # Create new desktop file if it doesn't exist
     cat > /usr/share/applications/com.cisco.secureclient.gui.desktop << 'EOF'
@@ -204,19 +174,32 @@ Type=Application
 Name=Cisco Secure Client
 Comment=Cisco Secure Client
 Icon=/opt/cisco/secureclient/pixmaps/vpnui.png
-Exec=/opt/cisco/secureclient/bin/vpnui-wrapper.sh
+Exec=/usr/local/bin/vpnui-wrapper.sh
 Terminal=false
 Categories=Network;
 EOF
 fi
 
-# Optional KDE desktop file (create in user's home, needs to be run for each user)
-if [ -d "$HOME/.local/share/applications" ]; then
-    if [ -f "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop" ]; then
-        cp "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop" "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop.bak"
-        sed -i 's|^Exec=.*|Exec=/opt/cisco/secureclient/bin/vpnui-wrapper.sh|' "$HOME/.local/share/applications/com.cisco.anyconnect.gui.desktop"
-    fi
-fi
+# Create autostart entry for the monitor script
+mkdir -p /etc/xdg/autostart
+cat > /etc/xdg/autostart/cisco-vpn-monitor.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Cisco VPN Monitor
+Comment=Keeps Cisco VPN Agent running
+Exec=sudo /usr/local/bin/vpnagentd-monitor.sh
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+# Add sudoers entry to allow running the monitor without password
+cat > /etc/sudoers.d/cisco-vpn << 'EOF'
+# Allow users to start/stop VPN agent without password
+%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/vpnagentd-wrapper.sh
+%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/vpnagentd-monitor.sh
+EOF
+chmod 440 /etc/sudoers.d/cisco-vpn
 
 # Disable Auto Update in AnyConnect's local policy
 echo "Disabling Auto Update in AnyConnect's local policy..."
@@ -237,24 +220,13 @@ if [ -f "/opt/cisco/secureclient/vpn/AnyConnectLocalPolicy.xml" ]; then
     fi
 fi
 
-# Reload systemd and restart vpnagentd
-echo "Reloading systemd and starting vpnagentd service..."
-systemctl daemon-reload
-systemctl stop vpnagentd.service
-pkill -f vpndownloader 2>/dev/null || true
-sleep 2
-systemctl start vpnagentd.service
+# Start the VPN agent
+echo "Starting Cisco VPN Agent..."
+/usr/local/bin/vpnagentd-wrapper.sh
 
-# Start the watchdog service in the background
-echo "Starting vpnagentd-watchdog service in the background..."
-systemctl start vpnagentd-watchdog.service &
-
-# Wait a moment to ensure service starts properly
-sleep 2
-
-# Verify the watchdog service status without hanging
-echo "Checking service status (non-blocking)..."
-systemctl is-active --quiet vpnagentd-watchdog.service && echo "Watchdog service started successfully" || echo "Watchdog service may have failed to start - check logs for details"
+# Start the monitor process in the background
+echo "Starting VPN Agent monitor in the background..."
+nohup /usr/local/bin/vpnagentd-monitor.sh > /var/log/vpnagentd-monitor.log 2>&1 &
 
 # Cleanup
 echo "Cleaning up temporary files..."
@@ -264,14 +236,15 @@ rm -rf "$TEMP_DIR"
 echo "==============================================="
 echo "  Fix installed successfully!"
 echo "==============================================="
-echo "You can now launch Cisco AnyConnect using:"
+echo "The Cisco VPN Agent is now running as a standalone process"
+echo "and will automatically restart if it crashes."
+echo ""
+echo "You can start the Cisco Secure Client using:"
 echo "1. The application menu"
-echo "2. Terminal command: /opt/cisco/secureclient/bin/vpnui-wrapper.sh"
-echo "3. Verify the service is running: systemctl status vpnagentd.service"
+echo "2. Terminal command: /usr/local/bin/vpnui-wrapper.sh"
 echo ""
-echo "A watchdog service has been installed to automatically restart"
-echo "the VPN agent if it crashes. You can check its status with:"
-echo "systemctl status vpnagentd-watchdog.service"
+echo "The agent monitor is running in the background and"
+echo "will restart automatically if needed."
 echo ""
-echo "Logs from the watchdog will be written to /var/log/vpnagentd-watchdog.log"
+echo "Monitor logs are written to: /var/log/vpnagentd-monitor.log"
 echo "==============================================="
